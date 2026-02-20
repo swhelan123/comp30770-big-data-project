@@ -1,3 +1,0 @@
-requests~=2.32.3
-yfinance==0.1.70
-PyYAML~=6.0
