@@ -1,0 +1,268 @@
+\documentclass[11pt]{article}
+
+% ---------- Page geometry ----------
+\usepackage[a4paper, margin=1in]{geometry}
+
+% ---------- Typography & language ----------
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% ---------- Graphics & tables ----------
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+
+% ---------- Code listings ----------
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{green!50!black}\itshape,
+  stringstyle=\color{red!60!black},
+  backgroundcolor=\color{gray!8},
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!40},
+  breaklines=true,
+  breakatwhitespace=true,
+  columns=flexible,
+  keepspaces=true,
+  showstringspaces=false,
+  aboveskip=6pt,
+  belowskip=6pt,
+  xleftmargin=2pt,
+  xrightmargin=2pt,
+}
+
+% ---------- Maths ----------
+\usepackage{amsmath}
+
+% ---------- Hyperlinks ----------
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!60!black,
+  citecolor=blue!60!black,
+  urlcolor=blue!60!black,
+}
+
+% ---------- Section formatting ----------
+\usepackage{titlesec}
+\titleformat{\section}{\normalfont\large\bfseries}{\thesection.}{0.5em}{}
+\titleformat{\subsection}{\normalfont\normalsize\bfseries}{\thesubsection}{0.5em}{}
+
+% ---------- Captions ----------
+\usepackage{caption}
+\captionsetup{font=small, labelfont=bf}
+
+% ---------- Abstract ----------
+\usepackage{abstract}
+\renewcommand{\abstractnamefont}{\normalfont\bfseries}
+\renewcommand{\abstracttextfont}{\normalfont\small}
+
+% ---------- Compact lists ----------
+\usepackage{enumitem}
+\setlist{nosep, leftmargin=*}
+
+% ---------- Float placement ----------
+\usepackage{float}
+
+% ==========================================================================
+% TITLE & AUTHORS
+% ==========================================================================
+\title{\textbf{[Insert Project Title Here — Strictly Under 20 Words]}}
+
+\author{
+  Louis Brennan \\{\small Student ID: XXXXXXXX}
+  \and
+  Torin Murray \\{\small Student ID: 23381726}
+  \and
+  Fransisc Pap \\{\small Student ID: XXXXXXXX}
+  \and
+  Shane Whelan \\{\small Student ID: 23344406}
+  \and
+  Liang Yu \\{\small Student ID: XXXXXXXX}
+}
+
+\date{
+  COMP30770 --- Programming for Big Data \\
+  University College Dublin \\
+  \vspace{4pt}
+  Code: \url{https://github.com/swhelan123/comp30770-big-data-project}
+}
+
+% ==========================================================================
+\begin{document}
+\maketitle
+
+% ------ Optional abstract ------
+% \begin{abstract}
+% TODO: Add abstract if required.
+% \end{abstract}
+
+% ==========================================================================
+\section{Introduction}
+% ==========================================================================
+
+This project combines two complementary datasets to analyse potential relationships between financial markets and property values. The first is the \textit{2000+ Assets (Stock \& FX) Historical Price} dataset from Kaggle, which contains daily and monthly price data for over 3,700 assets, each stored in a separate CSV file. In total, this dataset comprises approximately 56.8 million rows across 3,762 files (3.12\,GB), a scale at which a single-node relational pipeline required over five minutes of wall-clock time on an Apple M4 MacBook Air with 24\,GB of RAM (see Section~2). The second is the S\&P/Case--Shiller U.S. National Home Price Index, a monthly composite index that tracks residential property values across major metropolitan areas.
+
+The two datasets differ in both granularity and domain: the stock data is recorded daily at the individual-asset level, whereas the housing index provides a single monthly national aggregate. Reconciling these heterogeneous sources requires temporal alignment and per-asset aggregation, tasks that benefit from parallel and distributed processing.
+
+The objective of this project is to investigate whether month-over-month changes in stock prices correlate with corresponding changes in housing prices. Quantifying such relationships may offer insight into broader macroeconomic dynamics and demonstrates how large-scale, multi-source datasets can be processed efficiently using distributed data-processing techniques. The analysis pipeline was implemented using Shell, SQL, Python, and Hadoop MapReduce.
+
+% ==========================================================================
+\section{Traditional Data Processing Baseline}
+% ==========================================================================
+
+\subsection{Architecture \& Setup}
+
+\begin{itemize}
+    \item \textbf{Hardware:} Apple M4 MacBook Air (24\,GB RAM, macOS).
+    \item \textbf{Database Engine:} Relational database accessed via DataGrip.
+    \item \textbf{Pipeline Design:} A sequential pipeline consisting of a Python-based data preparation phase followed by four distinct SQL transformations.
+\end{itemize}
+
+\subsection{Pipeline Implementation}
+
+\textbf{Step 0: Data Preparation (Sequential I/O).}
+A traditional relational database cannot natively ingest a directory of fragmented files. Accordingly, a single-threaded Python script was used to concatenate the 3,761 stock CSVs into a single 3.12\,GB file prior to database ingestion.
+
+\begin{lstlisting}[language=bash]
+time python3 merge.py
+# Output: 99.66s user 9.78s system
+#         93% cpu 1:57.49 total
+\end{lstlisting}
+
+\textbf{Step 1: Temporal Aggregation.}
+The daily stock data (${\sim}$56.8\,M rows) was aggregated into monthly averages to align temporally with the monthly Case--Shiller housing index.
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE monthly_stocks AS
+SELECT
+    Ticker,
+    DATE_FORMAT(Date, '%Y-%m') AS YearMonth,
+    AVG(Close) AS Monthly_Avg_Close
+FROM stock_prices
+GROUP BY Ticker,
+         DATE_FORMAT(Date, '%Y-%m');
+\end{lstlisting}
+
+\textbf{Step 2: Data Integration (Inner Join).}
+The monthly stock averages were joined with the Case--Shiller housing index on a shared year--month key, retaining only those months present in both datasets.
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE joined_data AS
+SELECT
+    s.Ticker,
+    s.YearMonth,
+    s.Monthly_Avg_Close,
+    h.Housing_Index
+FROM monthly_stocks s
+JOIN housing_data h
+  ON s.YearMonth = DATE_FORMAT(h.Record_Date, '%Y-%m');
+\end{lstlisting}
+
+\textbf{Step 3: Feature Engineering (Window Functions).}
+Month-over-Month percentage change was calculated for both datasets using \texttt{LAG} window functions. \texttt{NULLIF} guards against erroneous zero-value records (e.g.\ historical prices of \$0.00), preventing division-by-zero errors.
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE feature_engineered_data AS
+SELECT
+    Ticker,
+    YearMonth,
+    (Monthly_Avg_Close - LAG(Monthly_Avg_Close)
+        OVER (PARTITION BY Ticker ORDER BY YearMonth))
+    / NULLIF(LAG(Monthly_Avg_Close)
+        OVER (PARTITION BY Ticker ORDER BY YearMonth), 0)
+        AS Stock_Pct_Change,
+    (Housing_Index - LAG(Housing_Index)
+        OVER (PARTITION BY Ticker ORDER BY YearMonth))
+    / NULLIF(LAG(Housing_Index)
+        OVER (PARTITION BY Ticker ORDER BY YearMonth), 0)
+        AS Housing_Pct_Change
+FROM joined_data;
+\end{lstlisting}
+
+\textbf{Step 4: Statistical Analysis (Pearson Correlation).}
+The Pearson Correlation Coefficient ($r$) was calculated for each ticker to quantify the linear association between its monthly stock returns and the corresponding housing index movement. Tickers with fewer than 12 months of overlapping data were excluded to ensure a minimum sample size for meaningful inference.
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE final_correlation AS
+SELECT
+    Ticker,
+    COUNT(*) AS Months_Correlated,
+    (COUNT(*) * SUM(Stock_Pct_Change * Housing_Pct_Change)
+     - SUM(Stock_Pct_Change) * SUM(Housing_Pct_Change))
+    / NULLIF(
+        SQRT(
+            (COUNT(*) * SUM(Stock_Pct_Change * Stock_Pct_Change)
+             - POW(SUM(Stock_Pct_Change), 2))
+          * (COUNT(*) * SUM(Housing_Pct_Change * Housing_Pct_Change)
+             - POW(SUM(Housing_Pct_Change), 2))
+        ), 0
+    ) AS Pearson_Correlation
+FROM feature_engineered_data
+WHERE Stock_Pct_Change IS NOT NULL
+  AND Housing_Pct_Change IS NOT NULL
+GROUP BY Ticker
+HAVING COUNT(*) >= 12
+ORDER BY Pearson_Correlation DESC;
+\end{lstlisting}
+
+\subsection{Execution Log \& Performance Metrics}
+
+\begin{table}[h]
+\centering
+\caption{Traditional pipeline execution metrics.}
+\label{tab:baseline}
+\renewcommand{\arraystretch}{1.15}
+\small
+\begin{tabularx}{\textwidth}{c l X X l}
+\toprule
+\textbf{Step} & \textbf{Operation} & \textbf{Input} & \textbf{Output} & \textbf{Time} \\
+\midrule
+0 & Data Prep (\texttt{merge.py}) & 3,761 CSV files (unmerged) & 1 consolidated CSV & 1\,m\,57.49\,s \\
+1 & Temporal Aggregation & \texttt{stock\_prices} ($\sim$56.8\,M rows) & \texttt{monthly\_stocks} (2.7\,M rows) & 3\,m\,04.85\,s \\
+2 & Inner Join & \texttt{monthly\_stocks} + \texttt{housing\_data} & \texttt{joined\_data} (1.58\,M rows) & 1.93\,s \\
+3 & Feature Engineering & \texttt{joined\_data} (1.58\,M rows) & \texttt{feature\_engineered\_data} & 33.23\,s \\
+4 & Statistical Analysis & \texttt{feature\_engineered\_data} & \texttt{final\_correlation} (2,901 rows) & 1.57\,s \\
+\midrule
+\multicolumn{2}{l}{\textbf{Total (End-to-End)}} & \textbf{Raw files} & \textbf{Final insights} & \textbf{$\sim$5\,m\,39\,s} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Analysis of Baseline Bottlenecks}
+
+Steps~0 and~1 together account for approximately 89\% of the total pipeline runtime. The file-merging phase (Step~0) consumed nearly two minutes due to the I/O overhead of reading 3,761 individual files sequentially through a single-threaded Python script, a pre-processing step necessitated by the inability of a traditional relational database to ingest a fragmented directory natively. The temporal aggregation phase (Step~1) required over three minutes to scan and group 56.8 million rows, saturating the compute capacity of a single node. By contrast, Steps~2--4 completed in under 37 seconds combined, indicating that the join, windowing, and correlation stages are not meaningful bottlenecks at this scale. These observations motivate the adoption of a distributed framework such as Hadoop MapReduce, which can ingest fragmented file directories as a native input format and parallelise aggregation operations across multiple worker nodes.
+
+% ==========================================================================
+\section{MapReduce Optimisation}
+% ==========================================================================
+
+\subsection{Bottleneck Identification \& Expectations}
+% TODO: Identify the 1-2 most time-consuming steps from Section 2.
+% Explain why MapReduce will optimise them.
+% State the clear expectation (e.g. "We expect to reduce execution time by a factor of X").
+
+\subsection{MapReduce Solution}
+% TODO: Present Map and Reduce function code snippets.
+
+\subsection{MapReduce Results \& Critical Analysis}
+% TODO: Present final execution time and metrics.
+% Explain exactly why results matched or deviated from expectations in 3.1.
+
+% ==========================================================================
+\section{Results}
+% ==========================================================================
+% TODO
+
+% ==========================================================================
+\section{Conclusion}
+% ==========================================================================
+% TODO
+
+\end{document}
