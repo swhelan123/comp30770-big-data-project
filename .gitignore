@@ -1,2 +1,17 @@
 *.csv
 data/
+
+# IDEs
+.idea/
+.vscode/
+.DS_Store
+
+# Outputs
+mapreduce_output.txt
+*.pdf
+*.log
+*.aux
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
