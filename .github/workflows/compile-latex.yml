@@ -1,0 +1,31 @@
+name: Compile LaTeX Report
+
+on:
+  push:
+    paths:
+      - 'report.tex'
+      - '**/*.tex'
+  pull_request:
+    paths:
+      - 'report.tex'
+      - '**/*.tex'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile LaTeX document
+        uses: xu-cheng/latex-action@v3
+        with:
+          root_file: report.tex
+          compiler: pdflatex
+
+      - name: Upload PDF as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-pdf
+          path: report.pdf
