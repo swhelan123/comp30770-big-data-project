@@ -1,5 +1,9 @@
 # Stock & Housing Market Analysis (COMP30770 - Big Data)
 
+[![Compile LaTeX Report](https://github.com/swhelan123/comp30770-big-data-project/actions/workflows/compile-latex.yml/badge.svg)](https://github.com/swhelan123/comp30770-big-data-project/actions/workflows/compile-latex.yml)
+
+**[📥 Download Latest Compiled Report (PDF Artifact)](https://nightly.link/swhelan123/comp30770-big-data-project/workflows/compile-latex.yml/main/report-pdf.zip)** _(Downloads a .zip containing the PDF)_
+
 ## Project Overview
 
 This project processes and analyses historical stock price data alongside the S&P/Case-Shiller U.S. National Home Price Index. The goal is to investigate whether month-over-month changes in stock prices correlate with corresponding changes in housing prices by computing the Pearson Correlation Coefficient for each asset.
