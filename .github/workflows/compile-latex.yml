@@ -21,7 +21,8 @@ jobs:
       - name: Compile LaTeX document
         uses: xu-cheng/latex-action@v3
         with:
-          root_file: report/report.tex
+          working_directory: report
+          root_file: report.tex
           compiler: pdflatex
 
       - name: Upload PDF as artifact
