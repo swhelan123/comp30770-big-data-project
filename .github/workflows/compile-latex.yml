@@ -3,12 +3,12 @@ name: Compile LaTeX Report
 on:
   push:
     paths:
-      - 'report.tex'
-      - '**/*.tex'
+      - "report/report.tex"
+      - "**/*.tex"
   pull_request:
     paths:
-      - 'report.tex'
-      - '**/*.tex'
+      - "report/report.tex"
+      - "**/*.tex"
   workflow_dispatch:
 
 jobs:
@@ -21,11 +21,11 @@ jobs:
       - name: Compile LaTeX document
         uses: xu-cheng/latex-action@v3
         with:
-          root_file: report.tex
+          root_file: report/report.tex
           compiler: pdflatex
 
       - name: Upload PDF as artifact
         uses: actions/upload-artifact@v4
         with:
           name: report-pdf
-          path: report.pdf
+          path: report/report.pdf
