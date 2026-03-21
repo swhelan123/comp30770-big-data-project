@@ -8,7 +8,6 @@ data/
 
 # Outputs
 mapreduce_output.txt
-*.pdf
 *.log
 *.aux
 *.out
