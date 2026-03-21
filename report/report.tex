@@ -102,9 +102,9 @@
 \section{Introduction}
 % ==========================================================================
 
-This project combines two complementary datasets to analyse potential relationships between financial markets and property values. The first is the \textit{2000+ Assets (Stock \& FX) Historical Price} dataset from Kaggle: 56.8 million rows across 3,762 individually stored CSV files totalling 3.12\,GB --- a volume that saturated a single-node relational pipeline for over five minutes on an Apple M4 MacBook Air (24\,GB RAM, macOS 26), well beyond what can be processed interactively without distributed infrastructure. The second is the S\&P/Case--Shiller U.S. National Home Price Index, a monthly composite index tracking residential property values. These datasets differ fundamentally in structure and granularity: the stock data is fragmented across thousands of files at daily per-asset resolution, while the housing data is a single file of monthly national aggregates --- reconciling them requires cross-domain temporal alignment that compounds the computational challenge.
+This project uses two datasets to investigate the relationship between stock market prices and residential property values. The first is the \textit{2000+ Assets (Stock \& FX) Historical Price} dataset from Kaggle, comprising 56.8 million rows across 3,762 individual CSV files totalling 3.12\,GB. At this scale, a standard single-node SQL pipeline took over five minutes to run on an Apple M4 MacBook Air (24\,GB RAM, macOS 26), as detailed in Section~2. The second is the S\&P/Case--Shiller U.S. National Home Price Index, a monthly composite tracking national residential property values. The two datasets differ in both structure and granularity: the stock data is spread across thousands of files at daily per-asset resolution, while the housing data is a single monthly time series. Combining them requires temporal alignment and per-ticker aggregation before any statistical analysis can be performed.
 
-The objective of this project is to determine whether month-over-month changes in individual stock prices correlate with corresponding changes in the national housing price index, using a distributed Hadoop MapReduce pipeline to make the computation tractable at scale. The value lies in demonstrating that heterogeneous, multi-source financial datasets can be joined, feature-engineered, and statistically analysed entirely within a distributed framework, without requiring prior consolidation on a single machine.
+The aim of this project is to determine whether month-over-month changes in individual stock prices are correlated with changes in the national housing index. A Hadoop MapReduce pipeline was used to make this analysis practical at the given data scale, processing all assets without requiring the files to be merged in advance.
 
 % ==========================================================================
 \section{Traditional Data Processing Baseline}
@@ -113,17 +113,17 @@ The objective of this project is to determine whether month-over-month changes i
 \subsection{Architecture \& Setup}
 
 \begin{itemize}
-    \item \textbf{Hardware:} Apple M4 MacBook Air, 24\,GB RAM, macOS 26. Peak memory usage during SQL aggregation: $\sim$18\,GB.
+    \item \textbf{Hardware:} Apple M4 MacBook Air, 24\,GB RAM, macOS 26. Peak memory during SQL aggregation: $\sim$18\,GB.
     \item \textbf{Database Engine:} MySQL accessed via DataGrip.
-    \item \textbf{Pipeline Design:} A sequential pipeline consisting of a single-threaded Python data preparation phase followed by four SQL transformations, each operating on the full dataset without parallelism.
+    \item \textbf{Pipeline Design:} A sequential pipeline consisting of a single-threaded Python data preparation step followed by four SQL queries, each operating on the full dataset.
 \end{itemize}
 
 \subsection{Pipeline Implementation}
 
 \textbf{Step 0: Data Preparation (Sequential I/O).}
-A traditional relational database cannot natively ingest a directory of fragmented files. A single-threaded Python script concatenated the 3,761 stock CSVs into one 3.12\,GB file, adding a ticker column derived from each filename before writing to disk.
+MySQL cannot ingest a directory of separate files directly. A Python script was used to concatenate the 3,761 stock CSVs into a single 3.12\,GB file, adding a ticker column from each filename in the process.
 
-\begin{lstlisting}[language=Python]
+\begin{lstlisting}[language=Python, columns=fullflexible]
 import pandas as pd, glob, os
 
 folder_path = "./data/1d"
@@ -148,7 +148,7 @@ time python3 merge.py
 \end{lstlisting}
 
 \textbf{Step 1: Temporal Aggregation.}
-The 56.8\,M-row daily stock table was grouped into monthly averages to align with the housing index granularity.
+The 56.8\,M daily stock rows were grouped into monthly averages to match the granularity of the housing index.
 
 \begin{lstlisting}[language=SQL]
 CREATE TABLE monthly_stocks AS
@@ -162,7 +162,7 @@ GROUP BY Ticker, DATE_FORMAT(Date, '%Y-%m');
 \end{lstlisting}
 
 \textbf{Step 2: Data Integration (Inner Join).}
-Monthly stock averages were joined with the Case--Shiller index on a shared \texttt{YYYY-MM} key, retaining only months present in both datasets (1987--2021).
+Monthly stock averages were joined with the Case--Shiller index on a shared \texttt{YYYY-MM} key, keeping only months present in both datasets (1987--2021).
 
 \begin{lstlisting}[language=SQL]
 CREATE TABLE joined_data AS
@@ -173,7 +173,7 @@ JOIN housing_data h ON s.YearMonth = DATE_FORMAT(h.Record_Date, '%Y-%m');
 \end{lstlisting}
 
 \textbf{Step 3: Feature Engineering (Window Functions).}
-Month-over-month percentage change was computed for both series using \texttt{LAG} window functions. \texttt{NULLIF} prevents division by zero on historical records with a \$0.00 close price.
+Month-over-month percentage change was computed for both series using \texttt{LAG} window functions. \texttt{NULLIF} prevents division by zero where historical close prices are \$0.00.
 
 \begin{lstlisting}[language=SQL]
 CREATE TABLE feature_engineered_data AS
@@ -236,25 +236,25 @@ ORDER BY Pearson_Correlation DESC;
 
 \subsection{Baseline Bottlenecks}
 
-Steps~0 and~1 together account for approximately 89\% of total pipeline runtime, with Steps~2--4 completing in under 37 seconds combined. These two steps are the clear targets for optimisation and are analysed in detail in Section~3.1.
+Steps~0 and~1 together account for roughly 89\% of total runtime, while Steps~2--4 complete in under 37 seconds combined. These two steps are the primary targets for optimisation and are discussed in Section~3.1.
 
-% ======================================================================
+% ==========================================================================
 \section{MapReduce Optimisation}
-% ======================================================================
+% ==========================================================================
 
 \subsection{Bottleneck Identification \& Expectations}
 
-Based on the execution metrics in Section~2.3, the primary bottlenecks are Step~0 (Data Preparation) and Step~1 (Temporal Aggregation), which together account for 89\% of the total runtime ($\sim$5 minutes).
+Based on the timings in Section~2.3, Steps~0 and~1 are the bottlenecks, accounting for 89\% of total runtime ($\sim$5 minutes).
 
-\textbf{Step~0 (Sequential I/O):} The requirement to manually merge 3,761 files before any real analysis is a significant drawback of relational databases. Hadoop's \texttt{FileInputFormat} natively treats a directory of files as a single logical input, eliminating this 117-second overhead entirely.
+\textbf{Step~0 (Sequential I/O):} The need to pre-merge 3,761 files is a limitation specific to relational databases. Hadoop's \texttt{FileInputFormat} reads a directory of files as a single input, so this step is unnecessary and its 117-second cost is eliminated entirely.
 
-\textbf{Step~1 (Single-Node Grouping):} Processing 56.8 million rows on a single CPU core is compute-bound. MapReduce parallelises this by distributing file splits across multiple mappers and using the Shuffle and Sort phase to pre-group tickers, allowing the Reducer to calculate averages in parallel.
+\textbf{Step~1 (Single-Node Grouping):} Grouping 56.8 million rows on a single core is the main compute bottleneck. MapReduce assigns one file per mapper, so all 3,762 CSVs are processed in parallel. The shuffle phase then groups records by ticker before they reach the reducer, replacing the sequential \texttt{GROUP BY} scan.
 
-\textbf{Expectation:} By eliminating the manual merge and parallelising the aggregation, we expect to reduce the execution time of the ingestion and aggregation phase by a factor of 3$\times$ to 5$\times$, depending on the cluster's replication factor and available containers.
+\textbf{Expectation:} Removing Step~0 and parallelising Step~1 across two datanodes should reduce the combined ingestion and aggregation time by a factor of 3 to 5, depending on container availability and HDFS replication overhead.
 
 \subsection{MapReduce Solution}
 
-The following MapReduce implementation parallelises Steps~0--1 and folds Steps~2--4 directly into the Reduce phase, eliminating all intermediate materialisation. The full source (\texttt{StockHousingCorrelation.java}) is on GitHub; key logic is presented below.
+The implementation parallelises Steps~0--1 and combines Steps~2--4 into the reduce phase, avoiding any intermediate disk writes. The full source (\texttt{StockHousingCorrelation.java}) is on GitHub; the key logic is presented below.
 
 \textbf{Key--Value Design.}
 \begin{itemize}
@@ -265,11 +265,11 @@ The following MapReduce implementation parallelises Steps~0--1 and folds Steps~2
 
 \textbf{Map Function.}
 
-The Mapper function:
+The mapper:
 \begin{itemize}
-  \item Reads stock data from HDFS, one file per map task (3,762 tasks in total).
-  \item Determines the ticker from the filename (e.g.\ \texttt{AAPL.csv} $\to$ \texttt{AAPL}), since column~0 of each CSV is \texttt{Date}, not a ticker field.
-  \item Emits one K-V pair per valid row: \texttt{(ticker,\ "STOCK,YYYY-MM,closePrice")}.
+  \item Processes one stock CSV per task (3,762 tasks in total).
+  \item Reads the ticker from the filename (e.g.\ \texttt{AAPL.csv} $\to$ \texttt{AAPL}), since column~0 of each file is \texttt{Date}.
+  \item Emits one key--value pair per valid row: \texttt{(ticker, "STOCK,YYYY-MM,closePrice")}.
 \end{itemize}
 
 \begin{lstlisting}[language=Java]
@@ -298,16 +298,16 @@ public void map(LongWritable key, Text value, Context context)
 
 \textbf{Reduce Function.}
 
-The Reducer function receives all K-V pairs for a single ticker from the shuffle and processes them as follows:
+For each ticker, the reducer:
 
 \begin{enumerate}
   \item Computes monthly average close prices (equivalent to SQL Step~1).
   \item Sorts months chronologically.
-  \item Computes month-over-month percentage change for both stock and housing series (equivalent to SQL Step~3).
+  \item Computes month-over-month percentage change for both series (equivalent to SQL Step~3).
   \item Calculates the Pearson Correlation Coefficient (equivalent to SQL Step~4).
 \end{enumerate}
 
-The housing index is loaded directly from HDFS in \texttt{setup()} once before any \texttt{reduce()} calls, replacing the SQL join (Step~2) without a shuffle dependency. Tickers with fewer than 12 overlapping months are discarded. The full reducer is on GitHub; the core Pearson calculation is shown below.
+The housing index is read directly from HDFS in \texttt{setup()} before any \texttt{reduce()} calls, which avoids routing it through the shuffle. Tickers with fewer than 12 overlapping months are dropped. The full reducer is on GitHub; the Pearson calculation is shown below.
 
 \begin{lstlisting}[language=Java]
 @Override
@@ -336,11 +336,11 @@ if (denominatorSq > 0) {
 }
 \end{lstlisting}
 
-The job was configured with a single reducer (\texttt{mapreduce.job.reduces=1}) and submitted to YARN (\texttt{mapreduce.framework.name=yarn}) for distributed execution across two datanode containers.
+The job was configured with a single reducer (\texttt{mapreduce.job.reduces=1}) and submitted to YARN (\texttt{mapreduce.framework.name=yarn}) for execution across two datanode containers.
 
 \subsection{MapReduce Results}
 
-This pipeline was executed on a Dockerised Hadoop cluster (one namenode, two datanodes, one ResourceManager) on the same Apple M4 MacBook Air (24\,GB RAM). YARN distributed submission was confirmed by the job ID and ResourceManager log:
+The job ran on a Dockerised Hadoop cluster (one namenode, two datanodes, one ResourceManager) on the same Apple M4 MacBook Air. YARN submission was confirmed by the job ID and ResourceManager log:
 
 \begin{lstlisting}[language=bash]
 INFO client.RMProxy: Connecting to ResourceManager at resourcemanager/172.18.0.5:8032
@@ -373,32 +373,36 @@ Output records     & 2,901   & 2,899   \\
 
 \subsection{Critical Analysis}
 
-The results largely align with our expectations, achieving a speedup factor of \textbf{3.9$\times$}.
+The results largely match expectations, with an end-to-end speedup of \textbf{3.9$\times$}.
 
-\textbf{1.\ I/O Efficiency:} The most dramatic gain came from the elimination of Step~0. Because Hadoop's \texttt{FileInputFormat} reads the directory of 3,762 files in parallel across nodes, the 117-second sequential Python file-handling overhead was completely bypassed. This alone accounts for 35\% of the total baseline runtime saved.
+\begin{enumerate}
 
-\textbf{2.\ Linear Scaling vs.\ Overhead:} While we used two datanodes, we did not see a perfect 2$\times$ improvement in the aggregation phase ($\sim$3.4$\times$ actual improvement on the map phase alone). This is due to MapReduce overhead: JVM container startup time and the network I/O of the Shuffle phase moving intermediate data from mappers to the reducer. At this dataset size, these fixed costs represent a non-trivial fraction of total runtime. In a production cluster with tens of nodes and a proportionally larger dataset, the per-node overhead would amortise and linear scaling would be more closely approached.
+\item \textbf{I/O Efficiency:} The largest gain came from removing Step~0. Because \texttt{FileInputFormat} reads the 3,762-file directory in parallel, the 117-second Python merge was bypassed entirely, accounting for 35\% of the total baseline time.
 
-\textbf{3.\ Data Skew:} Analysis of the task logs showed that certain tickers---particularly long-standing blue-chip stocks such as AAPL and ABT (both 421 months of data)---had significantly more historical records than recently listed assets ($<$50 months). This created a long-tail effect where a small number of map tasks processed substantially more rows than average, preventing a theoretically optimal parallel speedup.
+\item \textbf{Scaling vs.\ Overhead:} Despite using two datanodes, the aggregation phase improved by roughly 3.4$\times$ rather than the theoretical 2$\times$ per-node figure. This is partly because the per-file parallelism across 3,762 mappers is more significant than the two-node split, but also because JVM container startup and shuffle network I/O add overhead that grows less significant at larger cluster sizes.
 
-\textbf{4.\ Correctness:} Results were validated against the SQL baseline. Both pipelines apply identical methodology and produce consistent top-ranked tickers, with minor floating-point differences attributable to Java \texttt{double} vs.\ MySQL decimal arithmetic. An initial implementation routed housing data through the shuffle using a sentinel key (\texttt{000\_HOUSING}), but this produced zero output records in local mode due to unpredictable key ordering within a single JVM. The final design loads housing data in \texttt{setup()}, guaranteeing correctness regardless of execution mode.
+\item \textbf{Data Skew:} Some tickers had substantially more data than others. AAPL and ABT both have 421 months of records, while many recently listed assets have fewer than 50. This meant a small number of map tasks took noticeably longer than average, limiting the parallel efficiency.
 
-In summary, the transition to MapReduce successfully addressed both the I/O bottleneck of fragmented file ingestion and the compute bottleneck of single-node aggregation, validating the utility of distributed systems for heterogeneous financial datasets at this scale.
+\item \textbf{Correctness:} Output was cross-checked against the SQL results. Both pipelines use the same method and produce consistent rankings, with small numerical differences due to floating-point precision between Java \texttt{double} and MySQL decimal types. An earlier version passed housing data through the shuffle using a sentinel key (\texttt{000\_HOUSING}), but this produced no output in local mode because key ordering within a single JVM is not guaranteed. Loading the housing data in \texttt{setup()} resolved this.
+
+\end{enumerate}
+
+The MapReduce approach removed both the file I/O bottleneck and the single-node aggregation constraint that dominated the SQL pipeline runtime.
 
 % ==========================================================================
 \section{Results}
 % ==========================================================================
 
-The MapReduce job produced Pearson Correlation Coefficients for \textbf{2,899 tickers}, cross-validated against the SQL baseline. Figure~\ref{fig:index_comparison} provides visual context: both indices exhibit long-run upward trends over the full 1987--present period but diverge significantly at key moments. While both markets broadly trend together over decades, our analysis measures month-over-month \textit{changes}, which are considerably noisier and less correlated --- explaining why the Pearson coefficients are uniformly low despite the apparent visual co-movement in levels.
+The MapReduce job produced Pearson Correlation Coefficients for \textbf{2,899 tickers}, cross-checked against the SQL baseline. Figure~\ref{fig:index_comparison} shows the two indices over time. Both trend upward across the full period, but diverge at several points. The analysis here measures month-over-month changes rather than index levels, which are considerably noisier and explain why the correlation coefficients are low even where the long-run trends appear similar.
 
 \begin{figure}[H]
   \centering
   \includegraphics[width=\textwidth]{stock_housing_comparison.png}
-  \caption{Comparison of the S\&P 500 stock index against the Case--Shiller U.S.\ National Home Price Index, 1987--present. Both indices exhibit long-run upward trends, but diverge notably during the 2008 financial crisis (housing peaks and collapses while stocks recover faster) and the post-2020 period (housing surges sharply while equity markets remain volatile).}
+  \caption{S\&P 500 stock index vs.\ the Case--Shiller U.S. National Home Price Index, 1987--present. Both indices trend upward overall, but diverge during the 2008 financial crisis and again after 2020.}
   \label{fig:index_comparison}
 \end{figure}
 
-Table~\ref{tab:top_positive} presents the top 10 most positively correlated assets, filtered to tickers with at least 100 months of overlapping data to exclude statistically unreliable short-history results.
+Table~\ref{tab:top_positive} shows the ten most positively correlated assets, restricted to tickers with at least 100 months of overlapping data.
 
 \begin{table}[H]
 \centering
@@ -424,16 +428,16 @@ ABCB     & 333 & 0.0985 \\
 \end{tabularx}
 \end{table}
 
-The correlation coefficients are uniformly low across all 2,899 assets. The strongest observed value among statistically reliable tickers ($\geq$100 months) is $r \approx 0.36$, and the vast majority fall below $|r| < 0.2$. This is a substantive finding: despite both markets being driven by macroeconomic conditions such as interest rates and GDP growth, they respond to different signals at monthly granularity. As Figure~\ref{fig:index_comparison} illustrates, the 2008 financial crisis caused a sharp divergence --- housing peaked in 2006 and collapsed through 2012, while equity markets recovered far more quickly --- and the post-2020 period saw housing accelerate dramatically while stocks remained volatile. These divergences suppress month-over-month correlation at precisely the most economically interesting periods. Longer-lag analyses or sector-specific groupings (e.g.\ REITs, homebuilders) would likely reveal stronger associations. FX pairs such as \texttt{GBPJPY-X} also appear in the output as they were stored alongside equities in the input directory, and should be excluded in any domain-specific downstream analysis.
+Correlation values are low across all 2,899 assets. The highest value among tickers with at least 100 months of data is $r \approx 0.36$, and most fall below $|r| < 0.2$. This suggests that at monthly granularity, individual stock returns and housing price changes are largely independent, even though both are influenced by broader macroeconomic conditions. As Figure~\ref{fig:index_comparison} shows, the two markets responded differently to the 2008 financial crisis: housing peaked in 2006 and fell through 2012, while equity markets recovered more quickly. A similar divergence occurred after 2020. These periods reduce the month-over-month correlation precisely when the relationship between markets is most economically interesting. Sector-specific analysis, for example focusing on REITs or homebuilders, or using longer time lags, would likely produce stronger results. Note that FX pairs such as \texttt{GBPJPY-X} appear in the output since they were stored in the same input directory as the equities, and would need to be filtered out for any equity-specific analysis.
 
 % ==========================================================================
 \section{Conclusion}
 % ==========================================================================
 
-This project demonstrated a complete end-to-end Big Data pipeline for correlating stock market returns with U.S. housing price movements across 3,762 assets and 56.8 million records. A traditional single-node SQL pipeline established a baseline of 5\,m\,39\,s and $\sim$18\,GB peak memory, with 89\% of runtime consumed by sequential file merging and full-table aggregation. A Hadoop MapReduce implementation eliminated the merge step entirely, parallelised aggregation across 3,762 concurrent map tasks, and reduced peak per-container memory to $\sim$2\,GB, achieving a \textbf{3.9$\times$ end-to-end speedup} while producing results consistent with the SQL output.
+This project built and compared two pipelines for computing Pearson correlations between individual stock returns and the U.S. housing index across 3,762 assets and 56.8 million records. The SQL baseline took 5\,m\,39\,s with a peak memory of $\sim$18\,GB, with 89\% of that time spent on file merging and aggregation. The Hadoop MapReduce implementation removed the merge step entirely and distributed the aggregation across 3,762 parallel map tasks, completing in 1\,m\,27\,s and reducing peak per-container memory to $\sim$2\,GB, a \textbf{3.9$\times$ speedup}.
 
-The gap between the observed speedup and the theoretical maximum from two worker nodes is explained by MapReduce framework overhead (JVM startup, shuffle network I/O) and mild data skew from long-history tickers --- effects that would diminish at larger cluster sizes and data volumes.
+The gap between the observed and theoretical speedup reflects JVM startup costs, shuffle I/O overhead, and skew from tickers with long data histories. These effects become proportionally smaller at larger cluster sizes.
 
-The analytical findings indicate that month-over-month stock returns are weakly correlated with housing index changes for the overwhelming majority of assets ($|r| < 0.2$ for most tickers, maximum reliable $r \approx 0.36$). As Figure~\ref{fig:index_comparison} shows, the two markets share long-run trends but diverge sharply at major economic events, suppressing short-term correlation --- consistent with established cross-asset correlation literature at short timescales, and motivating further analysis at longer lags or within specific market sectors.
+On the analytical side, month-over-month stock returns show weak correlation with housing price changes for the vast majority of assets ($|r| < 0.2$ for most, maximum reliable $r \approx 0.36$). The two markets share broad long-run trends but diverge at major economic events, which suppresses short-term correlation. This is consistent with the cross-asset correlation literature at short timescales, and suggests that longer lags or sector-level groupings would be more informative.
 
 \end{document}
