@@ -1,10 +1,13 @@
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
@@ -12,6 +15,7 @@ import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.input.FileSplit;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 
 public class StockHousingCorrelation {
@@ -20,6 +24,14 @@ public class StockHousingCorrelation {
 
         private Text outKey = new Text();
         private Text outValue = new Text();
+        private String ticker;
+
+        @Override
+        protected void setup(Context context) throws IOException, InterruptedException {
+            // Extract ticker symbol from filename e.g. "AAPL.csv" -> "AAPL"
+            String filename = ((FileSplit) context.getInputSplit()).getPath().getName();
+            ticker = filename.replace(".csv", "");
+        }
 
         @Override
         public void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
@@ -28,48 +40,25 @@ public class StockHousingCorrelation {
 
             String[] parts = line.split(",");
 
-            // Heuristic to separate housing data from stock data
-            if (parts.length >= 7) {
-                // Stock Data (Ticker, Date, Open, High, Low, Close, Adj Close, Volume)
-                String ticker = parts[0];
-                if (ticker.equalsIgnoreCase("Ticker") || ticker.equalsIgnoreCase("Symbol")) {
-                    return; // Skip header
-                }
+            // Stock CSV format: Date, Adj Close, Close, High, Low, Open, Volume
+            // Skip header row
+            if (parts[0].equalsIgnoreCase("Date")) return;
 
-                String dateStr = parts[1];
-                // Assuming Close price is at index 5 (or 3 depending on dataset).
-                // We will try index 5 first, falling back to 3 if needed.
-                String closePriceStr = parts.length > 5 ? parts[5] : parts[3];
+            // Need at least 3 columns and Close price at index 2 must not be empty
+            if (parts.length >= 3 && !parts[2].trim().isEmpty()) {
+                String dateStr = parts[0].trim();
+                String closePriceStr = parts[2].trim();
 
                 try {
                     double closePrice = Double.parseDouble(closePriceStr);
                     if (dateStr.length() >= 7) {
-                        String yearMonth = dateStr.substring(0, 7); // Extract YYYY-MM
+                        String yearMonth = dateStr.substring(0, 7); // YYYY-MM
                         outKey.set(ticker);
                         outValue.set("STOCK," + yearMonth + "," + closePrice);
                         context.write(outKey, outValue);
                     }
                 } catch (NumberFormatException e) {
-                    // Ignore parse errors (e.g., missing data)
-                }
-            } else if (parts.length == 2) {
-                // Housing Data (DATE, CSUSHPINSA)
-                String dateStr = parts[0];
-                if (dateStr.toUpperCase().contains("DATE")) {
-                    return; // Skip header
-                }
-
-                try {
-                    double indexVal = Double.parseDouble(parts[1]);
-                    if (dateStr.length() >= 7) {
-                        String yearMonth = dateStr.substring(0, 7);
-                        // Use 000_HOUSING to ensure it gets sorted lexicographically before any Ticker
-                        outKey.set("000_HOUSING");
-                        outValue.set("HOUSING," + yearMonth + "," + indexVal);
-                        context.write(outKey, outValue);
-                    }
-                } catch (NumberFormatException e) {
-                    // Ignore parse errors
+                    // Ignore rows with missing/invalid close price
                 }
             }
         }
@@ -77,25 +66,34 @@ public class StockHousingCorrelation {
 
     public static class CorrelationReducer extends Reducer<Text, Text, Text, Text> {
 
-        // Caches the housing data. Since 000_HOUSING comes first, this will be populated early.
         private Map<String, Double> housingData = new HashMap<>();
         private Text outValue = new Text();
 
         @Override
-        public void reduce(Text key, Iterable<Text> values, Context context) throws IOException, InterruptedException {
-            String currentKey = key.toString();
-
-            if (currentKey.equals("000_HOUSING")) {
-                for (Text val : values) {
-                    String[] parts = val.toString().split(",");
-                    if (parts.length == 3 && parts[0].equals("HOUSING")) {
-                        housingData.put(parts[1], Double.parseDouble(parts[2]));
+        protected void setup(Context context) throws IOException, InterruptedException {
+            // Load housing data directly from HDFS before any reduce() calls
+            Configuration conf = context.getConfiguration();
+            FileSystem fs = FileSystem.get(conf);
+            Path housingPath = new Path("/input/correlation/CSUSHPINSA.csv");
+            BufferedReader br = new BufferedReader(new InputStreamReader(fs.open(housingPath)));
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] parts = line.split(",");
+                if (parts.length == 2 && !parts[0].trim().equalsIgnoreCase("observation_date")) {
+                    try {
+                        String yearMonth = parts[0].trim().substring(0, 7);
+                        double indexVal = Double.parseDouble(parts[1].trim());
+                        housingData.put(yearMonth, indexVal);
+                    } catch (NumberFormatException e) {
+                        // Ignore parse errors
                     }
                 }
-                return;
             }
+            br.close();
+        }
 
-            // Processing Stock Data for a specific Ticker
+        @Override
+        public void reduce(Text key, Iterable<Text> values, Context context) throws IOException, InterruptedException {
             Map<String, List<Double>> stockPrices = new HashMap<>();
             for (Text val : values) {
                 String[] parts = val.toString().split(",");
@@ -106,21 +104,19 @@ public class StockHousingCorrelation {
                 }
             }
 
-            // 1. Temporal Aggregation: Calculate Monthly Average
+            // 1. Monthly Average
             Map<String, Double> monthlyAvg = new HashMap<>();
             for (Map.Entry<String, List<Double>> entry : stockPrices.entrySet()) {
                 double sum = 0;
-                for (double p : entry.getValue()) {
-                    sum += p;
-                }
+                for (double p : entry.getValue()) sum += p;
                 monthlyAvg.put(entry.getKey(), sum / entry.getValue().size());
             }
 
-            // 2. Sort months chronologically
+            // 2. Sort chronologically
             List<String> sortedMonths = new ArrayList<>(monthlyAvg.keySet());
             Collections.sort(sortedMonths);
 
-            // 3. Feature Engineering: Month-over-Month Percentage Change
+            // 3. Month-over-Month % Change
             List<Double> stockPctChanges = new ArrayList<>();
             List<Double> housingPctChanges = new ArrayList<>();
 
@@ -128,29 +124,20 @@ public class StockHousingCorrelation {
                 String prevMonth = sortedMonths.get(i - 1);
                 String currMonth = sortedMonths.get(i);
 
-                // Both datasets must have data for the previous and current month
-                if (!housingData.containsKey(prevMonth) || !housingData.containsKey(currMonth)) {
-                    continue;
-                }
+                if (!housingData.containsKey(prevMonth) || !housingData.containsKey(currMonth)) continue;
 
                 double prevStock = monthlyAvg.get(prevMonth);
                 double currStock = monthlyAvg.get(currMonth);
                 double prevHousing = housingData.get(prevMonth);
                 double currHousing = housingData.get(currMonth);
 
-                // Prevent division by zero
-                if (prevStock == 0 || prevHousing == 0) {
-                    continue;
-                }
+                if (prevStock == 0 || prevHousing == 0) continue;
 
-                double stockPct = (currStock - prevStock) / prevStock;
-                double housingPct = (currHousing - prevHousing) / prevHousing;
-
-                stockPctChanges.add(stockPct);
-                housingPctChanges.add(housingPct);
+                stockPctChanges.add((currStock - prevStock) / prevStock);
+                housingPctChanges.add((currHousing - prevHousing) / prevHousing);
             }
 
-            // 4. Statistical Analysis: Pearson Correlation
+            // 4. Pearson Correlation
             int n = stockPctChanges.size();
             if (n >= 12) {
                 double sumX = 0,
@@ -173,7 +160,7 @@ public class StockHousingCorrelation {
 
                 if (denominatorSq > 0) {
                     double correlation = numerator / Math.sqrt(denominatorSq);
-                    // Output format: Ticker \t Months_Correlated \t Pearson_Correlation
+                    // Output: Ticker \t Months_Compared \t Pearson_Correlation
                     outValue.set(n + "\t" + String.format("%.6f", correlation));
                     context.write(key, outValue);
                 }
@@ -188,16 +175,13 @@ public class StockHousingCorrelation {
         }
 
         Configuration conf = new Configuration();
-        // Force exactly 1 reducer so that "000_HOUSING" key processes housing data
-        // before any tickers are evaluated within the same JVM instance.
         conf.setInt("mapreduce.job.reduces", 1);
+        conf.set("mapreduce.framework.name", "yarn");
 
         Job job = Job.getInstance(conf, "Stock and Housing Pearson Correlation");
         job.setJarByClass(StockHousingCorrelation.class);
-
         job.setMapperClass(CorrelationMapper.class);
         job.setReducerClass(CorrelationReducer.class);
-
         job.setOutputKeyClass(Text.class);
         job.setOutputValueClass(Text.class);
 
