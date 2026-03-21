@@ -28,7 +28,7 @@ public class StockHousingCorrelation {
 
         @Override
         protected void setup(Context context) throws IOException, InterruptedException {
-            // Extract ticker symbol from filename e.g. "AAPL.csv" -> "AAPL"
+            // get the ticker from the file name since it's not in the data
             String filename = ((FileSplit) context.getInputSplit()).getPath().getName();
             ticker = filename.replace(".csv", "");
         }
@@ -40,11 +40,11 @@ public class StockHousingCorrelation {
 
             String[] parts = line.split(",");
 
-            // Stock CSV format: Date, Adj Close, Close, High, Low, Open, Volume
-            // Skip header row
+            // the columns are Date, Adj Close, Close, High, Low, Open, Volume
+            // drop the header
             if (parts[0].equalsIgnoreCase("Date")) return;
 
-            // Need at least 3 columns and Close price at index 2 must not be empty
+            // make sure we actually have a close price
             if (parts.length >= 3 && !parts[2].trim().isEmpty()) {
                 String dateStr = parts[0].trim();
                 String closePriceStr = parts[2].trim();
@@ -52,13 +52,13 @@ public class StockHousingCorrelation {
                 try {
                     double closePrice = Double.parseDouble(closePriceStr);
                     if (dateStr.length() >= 7) {
-                        String yearMonth = dateStr.substring(0, 7); // YYYY-MM
+                        String yearMonth = dateStr.substring(0, 7); // grab year and month
                         outKey.set(ticker);
                         outValue.set("STOCK," + yearMonth + "," + closePrice);
                         context.write(outKey, outValue);
                     }
                 } catch (NumberFormatException e) {
-                    // Ignore rows with missing/invalid close price
+                    // just skip rows with messed up numbers
                 }
             }
         }
@@ -71,7 +71,7 @@ public class StockHousingCorrelation {
 
         @Override
         protected void setup(Context context) throws IOException, InterruptedException {
-            // Load housing data directly from HDFS before any reduce() calls
+            // load up the housing data from HDFS first so it's ready for the reducers
             Configuration conf = context.getConfiguration();
             FileSystem fs = FileSystem.get(conf);
             Path housingPath = new Path("/input/correlation/CSUSHPINSA.csv");
@@ -85,7 +85,7 @@ public class StockHousingCorrelation {
                         double indexVal = Double.parseDouble(parts[1].trim());
                         housingData.put(yearMonth, indexVal);
                     } catch (NumberFormatException e) {
-                        // Ignore parse errors
+                        // skip bad data
                     }
                 }
             }
@@ -104,7 +104,7 @@ public class StockHousingCorrelation {
                 }
             }
 
-            // 1. Monthly Average
+            // figure out the monthly averages for the stock
             Map<String, Double> monthlyAvg = new HashMap<>();
             for (Map.Entry<String, List<Double>> entry : stockPrices.entrySet()) {
                 double sum = 0;
@@ -112,11 +112,11 @@ public class StockHousingCorrelation {
                 monthlyAvg.put(entry.getKey(), sum / entry.getValue().size());
             }
 
-            // 2. Sort chronologically
+            // sort months to calculate the month-over-month changes properly
             List<String> sortedMonths = new ArrayList<>(monthlyAvg.keySet());
             Collections.sort(sortedMonths);
 
-            // 3. Month-over-Month % Change
+            // find the % change for stock and housing
             List<Double> stockPctChanges = new ArrayList<>();
             List<Double> housingPctChanges = new ArrayList<>();
 
@@ -137,7 +137,7 @@ public class StockHousingCorrelation {
                 housingPctChanges.add((currHousing - prevHousing) / prevHousing);
             }
 
-            // 4. Pearson Correlation
+            // calculate the pearson correlation if we have enough data points
             int n = stockPctChanges.size();
             if (n >= 12) {
                 double sumX = 0,
@@ -160,7 +160,7 @@ public class StockHousingCorrelation {
 
                 if (denominatorSq > 0) {
                     double correlation = numerator / Math.sqrt(denominatorSq);
-                    // Output: Ticker \t Months_Compared \t Pearson_Correlation
+                    // print out ticker, number of months, and the correlation
                     outValue.set(n + "\t" + String.format("%.6f", correlation));
                     context.write(key, outValue);
                 }
