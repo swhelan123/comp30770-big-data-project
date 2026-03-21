@@ -63,6 +63,7 @@ public class StockHousingCorrelation {
             }
         }
     }
+    
 
     public static class CorrelationReducer extends Reducer<Text, Text, Text, Text> {
 
