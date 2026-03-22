@@ -12,7 +12,7 @@ The project compares traditional relational database performance (SQL) against d
 
 ## Data Sources
 
-1. **Stock Data:** [2000+ Assets (Stock & FX) Historical Price](https://www.kaggle.com/) (Kaggle) - Contains daily price data for thousands of assets across separate CSV files.
+1. **Stock Data:** [2000+ Assets (Stock & FX) Historical Price](https://www.kaggle.com/datasets/benjaminpo/sp500-spx-components-stock-price) (Kaggle) - Contains daily price data for thousands of assets across separate CSV files.
 2. **Housing Data:** [S&P/Case-Shiller U.S. National Home Price Index](https://fred.stlouisfed.org/series/CSUSHPINSA) - A monthly composite index tracking residential property values.
 
 ## Repository Structure
