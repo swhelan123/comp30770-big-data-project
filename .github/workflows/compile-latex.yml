@@ -23,7 +23,8 @@ jobs:
         with:
           working_directory: report
           root_file: report.tex
-          compiler: pdflatex
+          compiler: latexmk
+          args: -pdf -interaction=nonstopmode -halt-on-error
 
       - name: Upload PDF as artifact
         uses: actions/upload-artifact@v4
