@@ -1,0 +1,64 @@
+# This creates a dedicated simulated network for your cluster
+networks:
+  hadoop_net:
+    driver: bridge
+
+services:
+  # The Master Node (Manages the file system and resource allocation)
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    networks:
+      - hadoop_net
+    ports:
+      - "9870:9870" # NameNode Web UI
+      - "9000:9000" # HDFS port
+    volumes:
+      - ./project_data:/hadoop/dfs/data/project_data
+    environment:
+      - CLUSTER_NAME=comp30770_cluster
+    env_file:
+      - ./hadoop.env
+
+  # Worker Node 1 (Executes MapReduce tasks and stores data blocks)
+  datanode1:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode1
+    networks:
+      - hadoop_net
+    depends_on:
+      - namenode
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+    env_file:
+      - ./hadoop.env
+
+  # Worker Node 2 (Provides true parallelization)
+  datanode2:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode2
+    networks:
+      - hadoop_net
+    depends_on:
+      - namenode
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+    env_file:
+      - ./hadoop.env
+
+  # The Resource Manager (YARN - Handles the MapReduce job scheduling)
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: resourcemanager
+    networks:
+      - hadoop_net
+    ports:
+      - "8088:8088" # YARN Web UI
+    depends_on:
+      - namenode
+      - datanode1
+      - datanode2
+    environment:
+      SERVICE_PRECONDITION: "namenode:9000 namenode:9870 datanode1:9864 datanode2:9864"
+    env_file:
+      - ./hadoop.env

@@ -45,3 +45,20 @@ Both implementations read the fragmented stock CSVs and the housing CSV simultan
 
 - `report.tex`: LaTeX source code for the project report detailing architecture, bottlenecks, and performance analysis.
 - **GitHub Actions:** The repository features an automated workflow (`.github/workflows/compile-latex.yml`) that automatically compiles the LaTeX document into a PDF (`report.pdf`) upon any commit or push, making the latest version available as a downloadable Artifact in the Actions tab.
+
+### 5. `docker/` (Hadoop Cluster Environment)
+
+- `docker-compose.yml`: A fully containerised Hadoop multi-node cluster (NameNode, 2x DataNodes, ResourceManager) for running the MapReduce jobs locally.
+- `hadoop.env`: Environment variables for the cluster configuration.
+
+## Running the Hadoop Cluster Locally
+
+You can spin up the distributed environment using Docker:
+
+```bash
+cd docker
+docker-compose up -d
+```
+
+- **NameNode UI:** `http://localhost:9870`
+- **YARN Resource Manager:** `http://localhost:8088`
